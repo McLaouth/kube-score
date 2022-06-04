@@ -6,25 +6,21 @@ import (
 	"io"
 
 	"github.com/zegl/kube-score/domain"
-	"github.com/zegl/kube-score/sarif"
 	"github.com/zegl/kube-score/scorecard"
+
+	"github.com/owenrumney/go-sarif/sarif"
 )
 
-func Output(input *scorecard.Scorecard) io.Reader {
-	var results []sarif.Results
-	var rules []sarif.Rules
+func Output(input *scorecard.Scorecard) (error, io.Reader) {
+	report, err := sarif.New(sarif.Version210)
+	if err != nil {
+		return err, nil
+	}
+
+	run := sarif.NewRun("kube-score", "https://kube-score.com/")
 
 	addRule := func(check domain.Check) {
-		for _, r := range rules {
-			if r.ID == check.ID {
-				return
-			}
-		}
-
-		rules = append(rules, sarif.Rules{
-			ID:   check.ID,
-			Name: check.Name,
-		})
+		run.AddRule(check.ID).WithDescription(check.Name)
 	}
 
 	for _, v := range *input {
@@ -45,52 +41,37 @@ func Output(input *scorecard.Scorecard) io.Reader {
 
 			addRule(check.Check)
 
+			pb := sarif.NewPropertyBag()
+			pb.Add("confidence", "High")
+			pb.Add("severity", "High")
+
 			for _, comment := range check.Comments {
-				results = append(results, sarif.Results{
-					Message: sarif.Message{
-						Text: comment.Summary,
-					},
-					RuleID: check.Check.ID,
-					Level:  level,
-					Properties: sarif.ResultsProperties{
-						IssueConfidence: "HIGH",
-						IssueSeverity:   "HIGH",
-					},
-					Locations: []sarif.Locations{
-						{
-							PhysicalLocation: sarif.PhysicalLocation{
-								ArtifactLocation: sarif.ArtifactLocation{
-									URI: "file://" + v.FileLocation.Name,
-								},
-								ContextRegion: sarif.ContextRegion{
-									StartLine: v.FileLocation.Line,
-								},
-							},
-						},
-					},
-				})
+				run.AddResult(check.Check.ID).
+					WithLevel(level).
+					WithMessage(sarif.NewTextMessage(comment.Summary)).
+					WithProperties(pb.Properties).
+					WithLocation(
+						sarif.NewLocationWithPhysicalLocation(
+							sarif.NewPhysicalLocation().
+								WithArtifactLocation(
+									sarif.NewSimpleArtifactLocation("file://" + v.FileLocation.Name),
+								).WithRegion(
+								sarif.NewSimpleRegion(
+									v.FileLocation.Line,
+									v.FileLocation.Line,
+								),
+							),
+						),
+					)
 			}
 		}
 	}
 
-	run := sarif.Run{
-		Tool: sarif.Tool{
-			Driver: sarif.Driver{
-				Name:  "kube-score",
-				Rules: rules,
-			},
-		},
-		Results: results,
-	}
-	res := sarif.Sarif{
-		Runs:    []sarif.Run{run},
-		Version: "2.1.0",
-		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-	}
+	report.AddRun(run)
 
-	j, err := json.MarshalIndent(res, "", "    ")
+	j, err := json.MarshalIndent(report, "", "    ")
 	if err != nil {
-		panic(err)
+		return err, nil
 	}
-	return bytes.NewBuffer(j)
+	return nil, bytes.NewBuffer(j)
 }
